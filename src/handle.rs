@@ -1,15 +1,15 @@
 use std::time::SystemTime;
 
+use fuser::FileType;
 use parking_lot::Mutex;
 
 use crate::error::Result;
 use crate::mount::{Inode, Mount};
-use crate::types::Kind;
 
 #[derive(Clone, Debug)]
 pub struct DirEntry {
     pub ino: u64,
-    pub kind: Kind,
+    pub kind: FileType,
     pub name: String,
 }
 
@@ -21,18 +21,14 @@ struct ReadBuf {
 /// An open file. Keeps a read-ahead buffer so sequential reads share a single
 /// ranged `GetObject` request.
 pub struct FileHandle {
-    pub fh: u64,
-    pub ino: u64,
     pub key: String,
     pub size: u64,
     buf: Mutex<Option<ReadBuf>>,
 }
 
 impl FileHandle {
-    pub fn new(fh: u64, ino: u64, key: String, size: u64) -> Self {
+    pub fn new(key: String, size: u64) -> Self {
         Self {
-            fh,
-            ino,
             key,
             size,
             buf: Mutex::new(None),
@@ -85,7 +81,6 @@ impl FileHandle {
 /// An open directory. Entries are fetched lazily, page by page, via
 /// `ListObjectsV2` and cached for the lifetime of the handle.
 pub struct DirHandle {
-    pub fh: u64,
     pub ino: u64,
     pub prefix: String,
     entries: Mutex<Vec<DirEntry>>,
@@ -94,22 +89,21 @@ pub struct DirHandle {
 }
 
 impl DirHandle {
-    pub fn new(fh: u64, inode: &Inode) -> Self {
+    pub fn new(inode: &Inode) -> Self {
         let entries = vec![
             DirEntry {
                 ino: inode.id,
-                kind: Kind::Dir,
+                kind: FileType::Directory,
                 name: ".".to_string(),
             },
             DirEntry {
                 ino: inode.parent,
-                kind: Kind::Dir,
+                kind: FileType::Directory,
                 name: "..".to_string(),
             },
         ];
 
         Self {
-            fh,
             ino: inode.id,
             prefix: inode.prefix.clone(),
             entries: Mutex::new(entries),
@@ -133,7 +127,7 @@ impl DirHandle {
             }
 
             let token = self.token.lock().clone();
-            let page = mount.list(&self.prefix, Some("/"), None, token.as_deref(), None)?;
+            let page = mount.list_page(&self.prefix, token.as_deref())?;
 
             {
                 let mut entries = self.entries.lock();
@@ -147,14 +141,14 @@ impl DirHandle {
                     let inode = mount.intern(
                         self.ino,
                         name,
-                        Kind::Dir,
+                        FileType::Directory,
                         prefix.clone(),
                         0,
                         SystemTime::now(),
                     );
                     entries.push(DirEntry {
                         ino: inode.id,
-                        kind: Kind::Dir,
+                        kind: FileType::Directory,
                         name: name.to_string(),
                     });
                 }
@@ -170,21 +164,23 @@ impl DirHandle {
                     let inode = mount.intern(
                         self.ino,
                         name,
-                        Kind::File,
+                        FileType::RegularFile,
                         key.clone(),
                         meta.size,
                         meta.mtime,
                     );
                     entries.push(DirEntry {
                         ino: inode.id,
-                        kind: Kind::File,
+                        kind: FileType::RegularFile,
                         name: name.to_string(),
                     });
                 }
             }
 
+            // The last page is the one without a continuation token.
+            let done = page.next_token.is_none();
             *self.token.lock() = page.next_token;
-            *self.done.lock() = !page.is_truncated;
+            *self.done.lock() = done;
         }
     }
 }

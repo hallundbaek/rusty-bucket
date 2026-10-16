@@ -1,13 +1,24 @@
+//! rusty-bucket: a read-only FUSE filesystem for S3-compatible object stores
+//! (such as Ceph RGW). It is a read-only Rust port of
+//! [goofys](https://github.com/kahing/goofys).
+
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use clap::Parser;
 use fuser::{Config, MountOption};
-use rusty_bucket::backend::{build_client, S3Backend};
-use rusty_bucket::config::{parse_duration, parse_mode, parse_size, BackendConfig, FsConfig};
-use rusty_bucket::fuse::RustyBucket;
-use rusty_bucket::mount::Mount;
+
+mod backend;
+mod config;
+mod error;
+mod fuse;
+mod handle;
+mod mount;
+
+use backend::{build_client, S3Backend};
+use config::{parse_duration, parse_mode, parse_size, BackendConfig, FsConfig};
+use fuse::RustyBucket;
+use mount::Mount;
 
 /// A read-only FUSE filesystem for S3-compatible object stores (Ceph RGW).
 #[derive(Parser, Debug)]
@@ -74,21 +85,14 @@ struct Cli {
     /// Additional FUSE mount option (may be repeated).
     #[arg(short = 'o', long = "opt", value_name = "OPTION")]
     fuse_opts: Vec<String>,
-
-    /// Run in the foreground (accepted for goofys compatibility; always true).
-    #[arg(short = 'f', long)]
-    foreground: bool,
 }
 
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    // fuser always runs in the foreground; the flag exists for goofys parity.
-    let _ = cli.foreground;
 
     let (bucket, prefix) = FsConfig::parse_bucket_spec(&cli.bucket);
 
     let fs_config = FsConfig {
-        bucket: bucket.clone(),
         prefix,
         dir_mode: parse_mode(&cli.dir_mode)?,
         file_mode: parse_mode(&cli.file_mode)?,
@@ -161,10 +165,4 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-#[allow(dead_code)]
-fn assert_arc_send_sync() {
-    fn check<T: Send + Sync>() {}
-    check::<Arc<Mount>>();
 }

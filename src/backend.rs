@@ -10,17 +10,23 @@ use aws_smithy_runtime_api::http::Response;
 
 use crate::config::BackendConfig;
 use crate::error::{Error, Result};
-use crate::types::FileMeta;
 
-/// Result of a (possibly paginated) `ListObjectsV2` call.
+/// Size and modification time of an S3 object, as returned by HEAD or LIST.
+#[derive(Clone, Copy, Debug)]
+pub struct FileMeta {
+    pub size: u64,
+    pub mtime: SystemTime,
+}
+
+/// One page of a `/`-delimited `ListObjectsV2` call.
 #[derive(Clone, Debug, Default)]
 pub struct ListResult {
     /// Common prefixes (directories) as full keys ending in `/`.
     pub prefixes: Vec<String>,
     /// Objects under the prefix.
     pub items: Vec<(String, FileMeta)>,
+    /// Continuation token for the next page; `None` on the last page.
     pub next_token: Option<String>,
-    pub is_truncated: bool,
 }
 
 /// Read-only S3 storage backend, shared across all FUSE requests.
@@ -33,10 +39,6 @@ pub struct S3Backend {
 impl S3Backend {
     pub fn new(client: Client, bucket: String) -> Self {
         Self { client, bucket }
-    }
-
-    pub fn bucket(&self) -> &str {
-        &self.bucket
     }
 
     /// `HeadObject` for a single key.
@@ -55,8 +57,7 @@ impl S3Backend {
             mtime: out
                 .last_modified()
                 .map(to_system_time)
-                .unwrap_or_else(SystemTime::now),
-            etag: out.e_tag().map(str::to_string),
+                .unwrap_or(SystemTime::UNIX_EPOCH),
         })
     }
 
@@ -86,24 +87,32 @@ impl S3Backend {
         Ok(body.into_bytes().to_vec())
     }
 
-    /// `ListObjectsV2`. `delimiter` is typically `"/"` for directory listings.
-    pub async fn list(
+    /// One page of the directory listing under `prefix`, resuming from `token`.
+    pub async fn list_page(&self, prefix: &str, token: Option<&str>) -> Result<ListResult> {
+        self.list(prefix, token, None).await
+    }
+
+    /// Whether anything exists under `prefix` (detects implicit directories).
+    pub async fn dir_has_entries(&self, prefix: &str) -> Result<bool> {
+        let page = self.list(prefix, None, Some(1)).await?;
+        Ok(!page.items.is_empty() || !page.prefixes.is_empty())
+    }
+
+    /// `ListObjectsV2` with the `/` delimiter.
+    async fn list(
         &self,
         prefix: &str,
-        delimiter: Option<&str>,
-        max_keys: Option<u32>,
-        continuation_token: Option<&str>,
-        start_after: Option<&str>,
+        token: Option<&str>,
+        max_keys: Option<i32>,
     ) -> Result<ListResult> {
         let out = self
             .client
             .list_objects_v2()
             .bucket(&self.bucket)
             .prefix(prefix)
-            .set_delimiter(delimiter.map(str::to_string))
-            .set_max_keys(max_keys.map(|m| m as i32))
-            .set_continuation_token(continuation_token.map(str::to_string))
-            .set_start_after(start_after.map(str::to_string))
+            .delimiter("/")
+            .set_max_keys(max_keys)
+            .set_continuation_token(token.map(str::to_string))
             .send()
             .await
             .map_err(map_sdk_error)?;
@@ -125,7 +134,6 @@ impl S3Backend {
                         .last_modified()
                         .map(to_system_time)
                         .unwrap_or_else(SystemTime::now),
-                    etag: obj.e_tag().map(str::to_string),
                 };
                 Some((key, meta))
             })
@@ -135,7 +143,6 @@ impl S3Backend {
             prefixes,
             items,
             next_token: out.next_continuation_token().map(str::to_string),
-            is_truncated: out.is_truncated().unwrap_or(false),
         })
     }
 }
